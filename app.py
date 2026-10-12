@@ -15,7 +15,7 @@ st.set_page_config(
     page_title="Course File Checker & Generator",
     page_icon="📚",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="expanded",
 )
 
 # ====================== PATHS ======================
@@ -76,6 +76,17 @@ REQUIRED_HEADINGS = [
     "Sample hardcopies of answer sheets",
 ]
 
+# ====================== SESSION STATE ======================
+if "check_results" not in st.session_state:
+    st.session_state.check_results = None
+if "std_bytes" not in st.session_state:
+    st.session_state.std_bytes = None
+if "std_name" not in st.session_state:
+    st.session_state.std_name = None
+if "last_faculty_name" not in st.session_state:
+    st.session_state.last_faculty_name = None
+
+
 # ====================== HELPERS ======================
 def save_uploaded_file(uploaded_file, save_path_without_ext):
     if uploaded_file is None:
@@ -93,21 +104,44 @@ def save_uploaded_file(uploaded_file, save_path_without_ext):
         f.write(uploaded_file.getbuffer())
     return full_path
 
+
 def load_standard_file():
+    """Return path to standard on disk if present."""
     for ext in [".pdf", ".docx", ".txt"]:
         path = Path(str(STANDARD_PATH) + ext)
         if path.exists():
             return path
     return None
 
+
+def has_standard():
+    """True if standard is available from disk OR session."""
+    return load_standard_file() is not None or st.session_state.std_bytes is not None
+
+
+def get_standard_display_name():
+    path = load_standard_file()
+    if path:
+        return path.name
+    if st.session_state.std_name:
+        return st.session_state.std_name
+    return "standard"
+
+
 def extract_full_text(source, is_upload=False):
+    """
+    Extract text from PDF / DOCX / TXT.
+    For Streamlit UploadedFile always use BytesIO(getvalue()) so the pointer is not exhausted.
+    """
     try:
         if is_upload:
             name = source.name.lower()
-            file_obj = source
+            raw = source.getvalue()
+            file_obj = BytesIO(raw)
         else:
-            name = source.name.lower()
+            name = Path(source).name.lower()
             file_obj = source
+            raw = None
 
         if name.endswith(".pdf"):
             text = ""
@@ -117,8 +151,12 @@ def extract_full_text(source, is_upload=False):
                     if t:
                         text += t + "\n"
             return text
+
         elif name.endswith(".docx"):
-            doc = Document(file_obj)
+            if is_upload:
+                doc = Document(BytesIO(raw))
+            else:
+                doc = Document(str(source))
             parts = []
             for p in doc.paragraphs:
                 if p.text.strip():
@@ -129,14 +167,16 @@ def extract_full_text(source, is_upload=False):
                     if cells:
                         parts.append(" | ".join(cells))
             return "\n".join(parts)
+
         elif name.endswith(".txt"):
             if is_upload:
-                return file_obj.read().decode("utf-8", errors="ignore")
-            else:
-                return Path(file_obj).read_text(encoding="utf-8", errors="ignore")
+                return raw.decode("utf-8", errors="ignore")
+            return Path(source).read_text(encoding="utf-8", errors="ignore")
+
     except Exception as e:
         st.warning(f"Text extraction error: {e}")
     return ""
+
 
 def normalize(text):
     text = text.lower()
@@ -144,8 +184,10 @@ def normalize(text):
     text = re.sub(r"\s+", " ", text).strip()
     return text
 
+
 def similarity(a, b):
     return SequenceMatcher(None, normalize(a), normalize(b)).ratio()
+
 
 def find_heading_in_text(required_heading, full_text, threshold=0.65):
     lines = [l.strip() for l in full_text.split("\n") if l.strip()]
@@ -174,8 +216,9 @@ def find_heading_in_text(required_heading, full_text, threshold=0.65):
         "found": found,
         "matched_line": best_line,
         "score": best_score,
-        "content_length": content_length
+        "content_length": content_length,
     }
+
 
 def check_required_headings(full_text, threshold=0.65, min_content=30):
     results = []
@@ -194,17 +237,20 @@ def check_required_headings(full_text, threshold=0.65, min_content=30):
             missing_count += 1
         else:
             reason = "OK"
-        results.append({
-            "required": req,
-            "status": status,
-            "reason": reason,
-            "matched_line": res["matched_line"],
-            "score": res["score"],
-            "content_length": res["content_length"]
-        })
+        results.append(
+            {
+                "required": req,
+                "status": status,
+                "reason": reason,
+                "matched_line": res["matched_line"],
+                "score": res["score"],
+                "content_length": res["content_length"],
+            }
+        )
     total = len(REQUIRED_HEADINGS)
     coverage = round(((total - missing_count) / total) * 100, 1)
     return results, coverage, missing_count
+
 
 def generate_report(results, coverage, missing_count, your_name, std_name, threshold):
     report = f"""# Course File Structure Checklist Report
@@ -239,6 +285,7 @@ def generate_report(results, coverage, missing_count, your_name, std_name, thres
             report += "\n"
     return report
 
+
 # ====================== COURSE FILE GENERATOR ======================
 def set_run_font(run, size=11, bold=False):
     run.font.size = Pt(size)
@@ -248,6 +295,7 @@ def set_run_font(run, size=11, bold=False):
     except Exception:
         pass
     run.bold = bold
+
 
 def add_heading_para(doc, text, level=1):
     p = doc.add_paragraph()
@@ -262,12 +310,14 @@ def add_heading_para(doc, text, level=1):
     p.space_after = Pt(6)
     return p
 
+
 def add_body(doc, text):
     p = doc.add_paragraph()
     run = p.add_run(text)
     set_run_font(run, 11)
     p.space_after = Pt(4)
     return p
+
 
 def add_placeholder(doc, text="[To be filled by faculty]"):
     p = doc.add_paragraph()
@@ -279,6 +329,7 @@ def add_placeholder(doc, text="[To be filled by faculty]"):
     except Exception:
         pass
     return p
+
 
 def create_course_file(course_code, course_name, faculty_name, program, session, syllabus_text, ltpc="3-0-2-4"):
     doc = Document()
@@ -391,18 +442,36 @@ def create_course_file(course_code, course_name, faculty_name, program, session,
     add_heading_para(doc, "OUTCOME-BASED CURRICULUM", 1)
 
     add_heading_para(doc, "1. Vision and Mission of the University", 2)
-    add_body(doc, "Vision: To educate students in frontier areas of knowledge enabling them to take up challenges as ethical and responsible global citizens.")
-    add_body(doc, "Mission: To impart outcome based holistic education and produce globally competitive, ethical and socially responsible human resources.")
+    add_body(
+        doc,
+        "Vision: To educate students in frontier areas of knowledge enabling them to take up challenges as ethical and responsible global citizens.",
+    )
+    add_body(
+        doc,
+        "Mission: To impart outcome based holistic education and produce globally competitive, ethical and socially responsible human resources.",
+    )
     doc.add_paragraph()
 
     add_heading_para(doc, "2. Vision and Mission of the School", 2)
-    add_body(doc, "Vision: To build a future where education and innovation, empowered by collaboration, create a sustainable global impact.")
-    add_body(doc, "Mission: Provide rigorous industry-aligned education, enhance skills, foster research and innovation, build industry partnerships, and nurture ethical engineers.")
+    add_body(
+        doc,
+        "Vision: To build a future where education and innovation, empowered by collaboration, create a sustainable global impact.",
+    )
+    add_body(
+        doc,
+        "Mission: Provide rigorous industry-aligned education, enhance skills, foster research and innovation, build industry partnerships, and nurture ethical engineers.",
+    )
     doc.add_paragraph()
 
     add_heading_para(doc, "3. Vision and Mission of the Department", 2)
-    add_body(doc, "Vision: To be a role model computer science department imparting research based multidisciplinary competencies.")
-    add_body(doc, "Mission: Build student competency, deploy employability skills, foster research and innovation, build industry partnerships, produce ethical engineers.")
+    add_body(
+        doc,
+        "Vision: To be a role model computer science department imparting research based multidisciplinary competencies.",
+    )
+    add_body(
+        doc,
+        "Mission: Build student competency, deploy employability skills, foster research and innovation, build industry partnerships, produce ethical engineers.",
+    )
     doc.add_paragraph()
 
     add_heading_para(doc, "4. GA's, PEOs, POs and PSOs of the Program", 2)
@@ -447,7 +516,10 @@ def create_course_file(course_code, course_name, faculty_name, program, session,
     doc.add_paragraph()
 
     add_heading_para(doc, "Lesson Plan", 3)
-    add_placeholder(doc, "[Prepare week-wise / lecture-wise lesson plan with CO mapping, pedagogy and ICT tools]")
+    add_placeholder(
+        doc,
+        "[Prepare week-wise / lecture-wise lesson plan with CO mapping, pedagogy and ICT tools]",
+    )
     doc.add_paragraph()
 
     add_heading_para(doc, "CO-PO Mapping and CO-KSA Mapping", 3)
@@ -520,6 +592,7 @@ def create_course_file(course_code, course_name, faculty_name, program, session,
     buffer.seek(0)
     return buffer
 
+
 # ====================== UI ======================
 st.title("Course File Structure Checker & Generator")
 
@@ -532,91 +605,148 @@ with st.sidebar:
 
     st.markdown("---")
     st.header("Dr. Sachin Standard File")
-    st.caption("Needed only for Check Structure")
+    st.caption("Optional — stored in session (survives while app is open). Disk copy is also kept when possible.")
 
-    existing = load_standard_file()
-    if existing:
-        st.success(f"Loaded: {existing.name}")
+    # Show current standard status
+    disk_std = load_standard_file()
+    if disk_std:
+        st.success(f"On disk: {disk_std.name}")
+    if st.session_state.std_name:
+        st.success(f"In session: {st.session_state.std_name}")
+    if not disk_std and not st.session_state.std_name:
+        st.warning("No standard file loaded yet (optional for Check Structure)")
+
+    if disk_std or st.session_state.std_name:
         if st.button("Remove Standard"):
-            try:
-                existing.unlink()
-            except Exception:
-                pass
+            if disk_std:
+                try:
+                    disk_std.unlink()
+                except Exception:
+                    pass
+            st.session_state.std_bytes = None
+            st.session_state.std_name = None
             st.rerun()
-    else:
-        st.warning("No standard file uploaded yet")
 
     std_up = st.file_uploader("Upload Dr. Sachin Course File", type=["pdf", "docx", "txt"], key="std")
     if std_up:
-        save_uploaded_file(std_up, STANDARD_PATH)
-        st.success("Standard file saved")
+        # Keep in session (survives Cloud restarts better within the browser session)
+        st.session_state.std_bytes = std_up.getvalue()
+        st.session_state.std_name = std_up.name
+        # Also try to write to disk (works until Cloud recycles the container)
+        try:
+            save_uploaded_file(std_up, STANDARD_PATH)
+        except Exception:
+            pass
+        st.success(f"Standard loaded: {std_up.name}")
         st.rerun()
 
 tab1, tab2 = st.tabs(["Check Structure", "Generate Course File"])
 
-# TAB 1
+# ====================== TAB 1: CHECK STRUCTURE ======================
 with tab1:
     st.subheader("Check Faculty Course File")
-    st.markdown("Upload any faculty course file to see which required headings are missing or blank.")
+    st.markdown(
+        "Upload any faculty course file to see which required headings are missing or blank. "
+        "Results stay visible after the check."
+    )
 
     your_file = st.file_uploader("Upload faculty course file", type=["pdf", "docx", "txt"], key="faculty")
 
+    # Clear old results when a different faculty file is chosen
+    if your_file is not None and st.session_state.last_faculty_name != your_file.name:
+        st.session_state.check_results = None
+        st.session_state.last_faculty_name = your_file.name
+
     if st.button("Check Structure", type="primary", use_container_width=True, key="check_btn"):
-        std_path = load_standard_file()
-        if not std_path:
-            st.error("Please upload Dr. Sachin's standard file from the sidebar first.")
-        elif not your_file:
+        if not your_file:
             st.error("Please upload a faculty course file.")
+            st.session_state.check_results = None
         else:
             try:
                 with st.spinner("Checking headings..."):
                     your_text = extract_full_text(your_file, is_upload=True)
                     if not your_text.strip():
-                        st.error("Could not extract text from the faculty file.")
+                        st.error(
+                            "Could not extract text from the faculty file. "
+                            "Try a different format (DOCX/PDF/TXT) or a non-scanned PDF."
+                        )
+                        st.session_state.check_results = None
                     else:
                         results, coverage, missing_count = check_required_headings(
                             your_text, threshold=threshold, min_content=min_content
                         )
-                        c1, c2, c3 = st.columns(3)
-                        c1.metric("Total Required Headings", len(REQUIRED_HEADINGS))
-                        c2.metric("Missing / Blank", missing_count)
-                        c3.metric("Coverage", f"{coverage}%")
-                        st.progress(min(coverage / 100, 1.0))
-
-                        st.subheader("Checklist Result")
-                        problems = [r for r in results if r["status"] != "Present"]
-                        present = [r for r in results if r["status"] == "Present"]
-
-                        if problems:
-                            st.error(f"{len(problems)} headings are Missing or have blank content")
-                            for r in problems:
-                                with st.expander(f"{r['required']} — {r['status']}"):
-                                    st.write(f"Reason: {r['reason']}")
-                                    if r["matched_line"]:
-                                        st.write(f"Closest match: {r['matched_line']} (score {r['score']:.2f})")
-                        else:
-                            st.success("All required structural headings are present and contain content!")
-
-                        with st.expander("Present Headings"):
-                            for r in present:
-                                st.markdown(f"- **{r['required']}**")
-
-                        report = generate_report(results, coverage, missing_count,
-                                                 your_file.name, std_path.name, threshold)
-                        st.download_button(
-                            "Download Full Report",
-                            data=report,
-                            file_name=f"structure_check_{datetime.now().strftime('%Y%m%d_%H%M')}.md",
-                            mime="text/markdown",
-                            use_container_width=True
-                        )
+                        st.session_state.check_results = {
+                            "results": results,
+                            "coverage": coverage,
+                            "missing_count": missing_count,
+                            "your_name": your_file.name,
+                            "std_name": get_standard_display_name(),
+                            "threshold": threshold,
+                            "chars_extracted": len(your_text),
+                        }
+                        st.toast("Check complete", icon="✅")
             except Exception as e:
-                st.error("An error occurred")
+                st.error("An error occurred during the check.")
                 st.code(str(e))
                 with st.expander("Details"):
                     st.code(traceback.format_exc())
+                st.session_state.check_results = None
 
-# TAB 2
+    # ----- Render results from session_state (persists across reruns) -----
+    data = st.session_state.check_results
+    if data:
+        results = data["results"]
+        coverage = data["coverage"]
+        missing_count = data["missing_count"]
+
+        st.caption(
+            f"Faculty file: **{data['your_name']}** · "
+            f"Extracted {data.get('chars_extracted', '?')} characters · "
+            f"Threshold: {data['threshold']}"
+        )
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Total Required Headings", len(REQUIRED_HEADINGS))
+        c2.metric("Missing / Blank", missing_count)
+        c3.metric("Coverage", f"{coverage}%")
+        st.progress(min(coverage / 100.0, 1.0))
+
+        st.subheader("Checklist Result")
+        problems = [r for r in results if r["status"] != "Present"]
+        present = [r for r in results if r["status"] == "Present"]
+
+        if problems:
+            st.error(f"{len(problems)} headings are Missing or have blank content")
+            for r in problems:
+                with st.expander(f"{r['required']} — {r['status']}"):
+                    st.write(f"Reason: {r['reason']}")
+                    if r["matched_line"]:
+                        st.write(f"Closest match: `{r['matched_line']}` (score {r['score']:.2f})")
+        else:
+            st.success("All required structural headings are present and contain content!")
+
+        with st.expander(f"Present Headings ({len(present)})"):
+            for r in present:
+                st.markdown(f"- **{r['required']}**")
+
+        report = generate_report(
+            results,
+            coverage,
+            missing_count,
+            data["your_name"],
+            data["std_name"],
+            data["threshold"],
+        )
+        st.download_button(
+            "Download Full Report",
+            data=report,
+            file_name=f"structure_check_{datetime.now().strftime('%Y%m%d_%H%M')}.md",
+            mime="text/markdown",
+            use_container_width=True,
+            key="dl_report",
+        )
+
+# ====================== TAB 2: GENERATE COURSE FILE ======================
 with tab2:
     st.subheader("Generate a New Course File")
     st.markdown("Enter details + upload syllabus. The app creates a complete course file with official structure.")
@@ -631,7 +761,9 @@ with tab2:
         session = st.text_input("Session", value="Jan-Jun, 2026")
         ltpc = st.text_input("L-T-P-C", value="3-0-2-4")
 
-    syllabus_file = st.file_uploader("Upload your Syllabus (PDF / DOCX / TXT)", type=["pdf", "docx", "txt"], key="syllabus")
+    syllabus_file = st.file_uploader(
+        "Upload your Syllabus (PDF / DOCX / TXT)", type=["pdf", "docx", "txt"], key="syllabus"
+    )
 
     if st.button("Generate Course File", type="primary", use_container_width=True, key="gen_btn"):
         if not course_code or not course_name or not faculty_name:
@@ -650,10 +782,10 @@ with tab2:
                         program=program.strip() or "B Tech CSE",
                         session=session.strip() or "Jan-Jun, 2026",
                         syllabus_text=syllabus_text,
-                        ltpc=ltpc.strip() or "3-0-2-4"
+                        ltpc=ltpc.strip() or "3-0-2-4",
                     )
 
-                    safe_name = re.sub(r'[^\w\s-]', '', course_name).strip().replace(' ', '_')
+                    safe_name = re.sub(r"[^\w\s-]", "", course_name).strip().replace(" ", "_")
                     file_name = f"CourseFile_{course_code}_{safe_name}.docx"
 
                     st.success("Course file generated successfully!")
@@ -662,9 +794,12 @@ with tab2:
                         data=buffer,
                         file_name=file_name,
                         mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                        use_container_width=True
+                        use_container_width=True,
+                        key="dl_course",
                     )
-                    st.info("Sections marked [To be filled by faculty] should be completed by the course instructor.")
+                    st.info(
+                        "Sections marked [To be filled by faculty] should be completed by the course instructor."
+                    )
                 except Exception as e:
                     st.error("Failed to generate course file")
                     st.code(str(e))
